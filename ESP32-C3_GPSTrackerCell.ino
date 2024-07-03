@@ -24,11 +24,12 @@
  * v0.3.x: un peu de rafinement et ajout de divers champs à l'envoi.
  * v0.4.x: augmenter intervention sur un blocage que GPS par hot,warm,col start; fix sur calcul distance entre 2 pt
  * v0.5.x: preparation d'envoi à TB
+ * v0.6.x: optimisation, revue de code en bonne partie. revue de la fct enableGPS qui était possiblement en prblm.
  *
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.5.1"
+#define _VERSION "0.6.8"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -52,7 +53,9 @@
 #define GSMKeyPin 6
 
 //Broche de la LED indiquant la validité du data GPS
-#define LED_PIN 7  //Yh module ESP32-C3 M5 Stamp
+#define LED_PIN 7         // ESP32-C3 M5 Stamp
+#define LED_RED_PIN 8     // ESP32-C3 M5 Stamp
+#define DATALOG_PWR_PIN 9 //Allow data logger to start (external device)
 
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
 #define SerialMon Serial
@@ -63,6 +66,8 @@
 #define TINY_GSM_YIELD() { delay(4); }
 
 //Définition de la struture de données dans laquelle la string du GPS est récupérée:
+const int memberCount = 15;
+const int minimalMemberCount = 10;
 typedef struct gpsDataStruc {
   uint8_t GNSSRunStatus;
   uint8_t fixStatus;
@@ -90,6 +95,8 @@ gpsDataStruc gpsData;
 
 
 //--- Declaration des objets --------------------------------------------
+#define modemBaudRate 115200
+#define monitorBaudRate 9600   //Pour permettre au dataLogger de souffler...
 TinyGsm       modem(SerialAT);
 TinyGsmClient newclient(modem);
 PubSubClient  localMqtt(newclient);
@@ -113,12 +120,14 @@ const char* topicInit = "GsmTracker/init";
 const char* telemetryTopic = "v1/devices/me/telemetry";
 const char* attributeTopic = "v1/devices/me/attributes";
 
+const uint32_t waitForNetworkDelay = 12000;
+
 //-----------------------------------------------------------------------
 
 
 //--- Variables globales ------------------------------------------------
 uint32_t gpsTimer = 0;
-uint32_t gpsTimerDelay = 30*1000;  //30 secondes
+uint32_t gpsTimerDelay = 15*1000;  // Analyse de la string GPS aux 15 secondes
 bool gpsEnabled = false;  //global status of GPS
 enum appModes {GPS,SENDDATA};
 appModes currentMode = GPS;
@@ -135,10 +144,12 @@ uint32_t mqttLastReconnectAttempt = 0;
 
 uint32_t changeModeTimer = 0;
 const uint32_t modeSendData = 2*60*1000; // 2 minutes... mais devrait plutôt être dicté une fois l'envoi réalisé (ou echec pour manque)
-const uint32_t modeGPS = 2*60*1000;  //2 minutes... acquisition pendant 5 minutes. laisse suffisamment de temps au module GPS de récupérer la position.
-uint32_t changeModeDelay = modeSendData;
+const uint32_t modeGPS = 45*1000;  // minimum 45 secondes acquisition. laisse suffisamment de temps au module GPS de récupérer la position.
+uint32_t changeModeDelay = modeGPS;
 
 uint16_t iterationCounter = 0;
+
+uint16_t gsmMissedCounter = 0;
 
 int ledStatus = LOW;
 //-----------------------------------------------------------------------
@@ -162,6 +173,15 @@ int ledStatus = LOW;
  * 
  */
 
+bool boucleDelais(int delais=1000, int loop=8, bool debug=false) {
+      for (int i=0; i<loop; i++) {  //Boucle de délais de x secondes
+        if (debug) SerialMon.print(".");
+        delay(delais);
+      }
+      if (debug) SerialMon.println("o");
+      return true;
+}
+
 bool mqttConnect(PubSubClient *mqtt, bool debug=false) {
   // SerialMon.print("Connecting to ");
   // SerialMon.print(broker);
@@ -170,7 +190,7 @@ bool mqttConnect(PubSubClient *mqtt, bool debug=false) {
   mqtt->loop();
 
   if (status)
-    if (debug) SerialMon.print(" success");
+    { if (debug) SerialMon.print(" success"); }
   else
     if (debug) SerialMon.print(" fail");
 
@@ -183,15 +203,15 @@ bool connectMQTTBroker(PubSubClient *mqtt, int retry=3)
   int loopCount = retry;
   mqttLastReconnectAttempt = 0; //initial start, if required
   while (!mqtt->connected() && loopCount>0) { 
-    SerialMon.print("!");
     uint32_t t = millis();
+    SerialMon.print("!");
     // Reconnect every 10 seconds
     if (t - mqttLastReconnectAttempt > mqttReconnectDelay) { 
       mqttLastReconnectAttempt = t;
       mqtt->disconnect();
       mqtt->loop();
       //SerialMon.printf("MQTT disconnected. Connecting to %s...", brokerShiftr);
-      SerialMon.printf("MQTT disconnected. Connecting to %s...", brokerTBCAL);
+      SerialMon.printf("MQTT disconnected. Connecting to %s ", brokerTBCAL);
       delay(500);
       if (mqttConnect(mqtt,true)) {
         mqttLastReconnectAttempt = 0;
@@ -199,7 +219,7 @@ bool connectMQTTBroker(PubSubClient *mqtt, int retry=3)
         //mqtt->publish(topicInit, "GsmGPS started");
         //mqtt->loop();
       } else loopCount--;
-      SerialMon.println(".");
+      SerialMon.println("!");
     } else delay(1000);
   }
   if (loopCount>0) {
@@ -223,7 +243,7 @@ bool initGSMNTP() {
     retCode = true;
 
   return retCode;
-}  
+}
 
 bool getGSMNTP(int retry=3,bool rtc=false) {
 
@@ -266,8 +286,9 @@ bool getGSMNTP(int retry=3,bool rtc=false) {
   return retCode;
 }
 
-bool parseGPSdata(gpsDataStruc &data, bool debug=false) {
+bool parseGPSdata(gpsDataStruc &data, int &dataCount, bool debug=false) {
   bool retCode = false;
+  dataCount = 0;
 
   //Facon alternative puisque getGPS() marche pas...  
   char rawChar[100];      
@@ -279,71 +300,84 @@ bool parseGPSdata(gpsDataStruc &data, bool debug=false) {
   strcpy(rawGPSdata,rawChar);
 
   if (strlen(rawChar)) {
-    //1st step: count for the number of found field.
-    char * pch;
-    if(debug) SerialMon.printf("Splitting string \"%s\" into tokens:\n",rawChar);
-    pch = strtok (rawChar,",");
-    int count=1;
-    while (pch != NULL)
-    {
-      if (debug) SerialMon.printf("%d:%s\n",count,pch);
-      pch = strtok (NULL,",");
-      if (pch != NULL) count++;
-    }
-    if (debug) SerialMon.print("> found "+String(count)+" fields: ");
-    //2nd step: found 15 fields? yes, let's start over and retreive specific data
-    if (count==15) {
-      if (debug) SerialMon.println(" Ok.");
-      //Do again and match
-      pch = NULL;
-      pch = strtok (rawGPSdata,",");
+
+    if(debug) SerialMon.printf("+CGNSINF: \"%s\"\n",rawChar);
+
+    //Le 2e champ de la chaine: Fix-status, si 1=Ok... donc devrait-on attendre d'avoir "1,1," en début de chaine afin de statuer + rapidement sur l'état du GPS?
+    char * ponecomma;
+    ponecomma = strstr (rawChar,"1,1,");
+    if (ponecomma != NULL) {
+      if (ponecomma == rawChar)
+        if (debug) SerialMon.println("Fix status ready! Splitting into tokens:");
+      else 
+        if (debug) SerialMon.println("Odd...");
+
+      //1st step: count for the number of found field.
+      char * pch;
+      pch = strtok (rawChar,",");
       int count=1;
       while (pch != NULL)
       {
-        switch (count) {
-          case 1: data.GNSSRunStatus = atoi(pch); break;
-          case 2: data.fixStatus = atoi(pch); break;
-          case 3: strcpy(data.UTCDT,pch); break;
-          case 4: data.latitude = atof(pch); break;
-          case 5: data.longitude = atof(pch); break;
-          case 6: data.mslAltitude = atof(pch); break;
-          case 7: data.speedOG = atof(pch); break;
-          case 8: data.courseOG = atof(pch); break;
-          case 9: data.FixMode = atoi(pch); break;
-          case 10: data.HDOP = atof(pch); break;
-          case 11: data.PDOP = atof(pch); break;
-          case 12: data.VDOP = atof(pch);break;
-          case 13: data.GPSSatView = atoi(pch); break;
-          case 14: data.HPA = atof(pch); break;
-          case 15: data.VPA = atof(pch); break;
-          default: if (debug) SerialMon.println("error?");break;
-        }
-
-        if (debug) SerialMon.println("R"+String(count)+":"+String(pch));
-
-        //Next token:
+        if (debug) SerialMon.printf("%d:%s\n",count,pch);
         pch = strtok (NULL,",");
         if (pch != NULL) count++;
       }
-      if (debug) SerialMon.println("1) "+String(data.GNSSRunStatus));
-      if (debug) SerialMon.println("2) "+String(data.fixStatus));
-      if (debug) SerialMon.println("3) "+String(data.UTCDT));
-      if (debug) SerialMon.println("4) "+String(data.latitude,6));
-      if (debug) SerialMon.println("5) "+String(data.longitude,6));
+      if (debug) SerialMon.print("> found "+String(count)+" fields: ");
+      //2nd step: found 15 fields? yes, let's start over and retreive specific data
+      dataCount = count;
+      if (count==memberCount) {
+        if (debug) SerialMon.println(" Ok.");
+        //Do again and match
+        pch = NULL;
+        pch = strtok (rawGPSdata,",");
+        int count=1;
+        while (pch != NULL)
+        {
+          switch (count) {
+            case 1: data.GNSSRunStatus = atoi(pch); break;
+            case 2: data.fixStatus = atoi(pch); break;
+            case 3: strcpy(data.UTCDT,pch); break;
+            case 4: data.latitude = atof(pch); break;
+            case 5: data.longitude = atof(pch); break;
+            case 6: data.mslAltitude = atof(pch); break;
+            case 7: data.speedOG = atof(pch); break;
+            case 8: data.courseOG = atof(pch); break;
+            case 9: data.FixMode = atoi(pch); break;
+            case 10: data.HDOP = atof(pch); break;
+            case 11: data.PDOP = atof(pch); break;
+            case 12: data.VDOP = atof(pch);break;
+            case 13: data.GPSSatView = atoi(pch); break;
+            case 14: data.HPA = atof(pch); break;
+            case 15: data.VPA = atof(pch); break;
+            default: if (debug) SerialMon.println("error?");break;
+          }
 
-      // strptime marche pas avec cette forme... pour le moment... - 23 juin 2024
-      // // Recover time from UTCDT string
-      // struct tm tm;
-      // time_t t;
-      // strncpy(rawChar,data.UTCDT,strspn(data.UTCDT,"."));
-      // if (strptime(rawChar,"%Y%m%d%H%M%S",&tm) != NULL) {
-      //   tm.tm_isdst = -1;
-      //   t = mktime(&tm);
-      //   if (debug) SerialMon.println("epoch: "+String(t));
-      // } else if (debug) SerialMon.println("strptime error");
+          if (debug) SerialMon.println("R"+String(count)+":"+String(pch));
 
-      retCode = true;
-    } else if (debug) SerialMon.println(" expecting 15.");
+          //Next token:
+          pch = strtok (NULL,",");
+          if (pch != NULL) count++;
+        }
+        if (debug) SerialMon.println("1) "+String(data.GNSSRunStatus));
+        if (debug) SerialMon.println("2) "+String(data.fixStatus));
+        if (debug) SerialMon.println("3) "+String(data.UTCDT));
+        if (debug) SerialMon.println("4) "+String(data.latitude,6));
+        if (debug) SerialMon.println("5) "+String(data.longitude,6));
+
+        // strptime marche pas avec cette forme... pour le moment... - 23 juin 2024
+        // // Recover time from UTCDT string
+        // struct tm tm;
+        // time_t t;
+        // strncpy(rawChar,data.UTCDT,strspn(data.UTCDT,"."));
+        // if (strptime(rawChar,"%Y%m%d%H%M%S",&tm) != NULL) {
+        //   tm.tm_isdst = -1;
+        //   t = mktime(&tm);
+        //   if (debug) SerialMon.println("epoch: "+String(t));
+        // } else if (debug) SerialMon.println("strptime error");
+
+        retCode = true;
+      } else if (debug) SerialMon.println(" expecting "+String(memberCount));
+    } else if (debug) SerialMon.println("Fix status not yet ready");
   } else if (debug) SerialMon.println("> GPS:No data");
 
   return retCode;
@@ -359,31 +393,89 @@ void activateModem(int dly=0) {
   pinMode(GSMKeyPin,INPUT);
 }
 
+String getNetworkModes() {
+  // Get the help string, not the setting value
+  modem.sendAT("+CPSI?");
+  if (modem.waitResponse(GF(AT_NL "+CPSI:")) != 1) { return ""; }
+  String res = SerialAT.readStringUntil('\n');
+  modem.waitResponse();
+  return res;
+}
+
 bool connectGPRSNetwork(int retry=3) {
   bool retCode = false;
 
-  bool networkConnected = false;
+  bool networkConnected = modem.isNetworkConnected();
 
-  if (!modem.isNetworkConnected()) { 
+  if (!networkConnected) { 
     int loopCount = retry;
+    gpsEnabled = enableGPS(false);  //Suspectig GPS is ON... turning it OFF
     SerialMon.print("Checking Network: ");
-    while (!modem.isNetworkConnected() && loopCount>0) {
+    while (!networkConnected && loopCount>0) {
       SerialMon.print("disconnected. Attempting connect: ");
-      if (!modem.waitForNetwork(12000L, true)) {
-        SerialMon.print("fail... ");
-        //delay(10000);
+      networkConnected = modem.waitForNetwork(waitForNetworkDelay, true);
+      if (!networkConnected) {
+        SerialMon.print("fail! ");
         loopCount--;
+      } else SerialMon.print("success! ");
+      // Peut être retiré si l'optimisation le prouve (2 juil 2024)
+      // networkConnected = modem.isNetworkConnected();
+      // if (!networkConnected) {
+      //   SerialMon.print("disconnected. Attempting connect: ");
+      //   if (!modem.waitForNetwork(waitForNetworkDelay, true)) {
+      //     SerialMon.print("fail! ");
+      //     //delay(10000);
+      //     loopCount--;
+      //   } SerialMon.print("success! ");
+      // }
+    } //End-While
+    SerialMon.println(" ");
+    //if (loopCount == 0) {
+    if (!networkConnected) {
+      gsmMissedCounter++;
+      SerialMon.print("Check modem response. gsmMissedCounter: "+String(gsmMissedCounter));
+      if (modem.testAT()) {
+        SerialMon.print(" AT ok. ");
+         //If missed for more thatn 20 times...  (not decided - Yh 30 juin 2024)
+        if (gsmMissedCounter>20) {
+          //Time to reset? Do we need to reset SIM module along with ESP32?
+          // 30 juin 2024 - à décider - 3 juillet: ok, on le fait
+          SerialMon.print(" Force module reboot");
+          modem.sendAT("+CREBOOT" ); //Isue module reboot
+          boucleDelais(1000,5,true);
+          performModemInit();
+          gsmMissedCounter = 0;          
+        }
+      } else {
+        SerialMon.print(" AT NOT ok. performModemInit ");
+        performModemInit();
+        gsmMissedCounter = 0;
       }
-    }
-    if (loopCount>0) {
+      SerialMon.println(" Wait 1sec ...");
+      delay(1000);
+    } else {
       SerialMon.println("Network (re)connected");
-      networkConnected = true;
     }
   } else { 
     SerialMon.println("Network already connected");
-    networkConnected = true;
+    
   }
+  //Maintenant, traiter la connexion GPRS:
   if (networkConnected) {
+    gsmMissedCounter=0;
+    // Demander le mode via une commande getNetworkMode puis avec getPreferredModes  et getNetworkSystemMode(bool, int16)
+      
+    int16_t modemNM = modem.getNetworkMode();
+    int16_t modemPM = modem.getPreferredMode();
+    SerialMon.print("Network details: NM="+String(modemNM)+" PM="+String(modemPM));
+
+    bool n = 0;
+    int16_t stat = 0;
+    if (modem.getNetworkSystemMode(n,stat))
+      SerialMon.println(", NSM: n="+String(n)+" stat="+String(stat));
+    else
+      SerialMon.println(", NSM=got error");
+  
     // and make sure GPRS/EPS is still connected
     int loopCount = retry;
     SerialMon.print("Checking GPRS connection to ");
@@ -413,6 +505,8 @@ bool connectGPRSNetwork(int retry=3) {
       SerialMon.println(" > GPRS already connected with IP: "+modem.getLocalIP());
       retCode = true;      
     }
+    if (retCode)
+      SerialMon.println("> +CPSI:"+getNetworkModes());
   } 
   return retCode;
 }
@@ -431,30 +525,30 @@ String getDateTimeStr() {
 bool enableGPS(bool disena) {
   bool retCode = false;
   if (disena)
-    if (modem.enableGPS()) {
-      retCode = true;
-    }
-  else modem.disableGPS();
+    retCode = modem.enableGPS();
+  else
+    modem.disableGPS();
   return retCode;
 }
 
-bool getGPSCoords(float &lat, float &lon, int retry=3) {
-  bool retCode = false;
-  float gps_latitude  = 0;
-  float gps_longitude = 0;
-  int loopCount = retry;
-  while (modem.getGPS(&gps_latitude, &gps_longitude) && loopCount>0) {
-    SerialMon.print("GPS loop: "); SerialMon.println(loopCount);
-    loopCount--;
-  }
-  if (loopCount>0) {
-    lat = gps_latitude;
-    lon = gps_longitude;
-    retCode = true;
-  } else SerialMon.println(" > getGPS failed");
+//Fct qui ne sert pas ici puisque prbl avec la méthode getGPS pour le module SIM7078G
+// bool getGPSCoords(float &lat, float &lon, int retry=3) {
+//   bool retCode = false;
+//   float gps_latitude  = 0;
+//   float gps_longitude = 0;
+//   int loopCount = retry;
+//   while (modem.getGPS(&gps_latitude, &gps_longitude) && loopCount>0) {
+//     SerialMon.print("GPS loop: "); SerialMon.println(loopCount);
+//     loopCount--;
+//   }
+//   if (loopCount>0) {
+//     lat = gps_latitude;
+//     lon = gps_longitude;
+//     retCode = true;
+//   } else SerialMon.println(" > getGPS failed");
 
-  return retCode;
-}
+//   return retCode;
+// }
 
 bool performModemInit() {
   bool retCode = false;
@@ -462,62 +556,75 @@ bool performModemInit() {
   int hardCount = 0;
   bool modemInitStatus = false;
   while (!modemInitStatus) {    //Yh: utilise init() au lieu de restart()
-    modemInitStatus = modem.init();
+    if (hardCount<2)
+      modemInitStatus = modem.init();  //0,1
+    else
+      modemInitStatus = modem.restart(); //2+
+
     if (modemInitStatus) {
        retCode = true;
     } else {
-      SerialMon.print("Failed to restart modem... wait 10sec and retrying: "); SerialMon.println(loopCount);
-      if (loopCount%3 == 0) {
-        SerialMon.println("Re-activate modem (K pin trick)");
-        activateModem(1750);
-        hardCount++;
-      }
-      if (hardCount>2) { //Donc apres 3 fois.
+      SerialMon.print("Failed to restart modem... wait 2.5sec and retrying: lc="); SerialMon.println(String(loopCount)+" hc="+String(hardCount));
+      if (hardCount>3) { //Donc apres 3 fois.
         SerialMon.println("Hard reset on K pin");
         activateModem(12500);  //Hard RESET;
         hardCount = 0;
+        loopCount = 1;
       }
+      if (loopCount%3 == 0) {
+        SerialMon.println("Re-activate modem (K pin trick)");
+        //Yh 30 juin 2024: serait-ce une idée de mettre hors service avant de ré-activer? p-e que même le AT répond pas?
+        if (!modem.testAT())  //Si pas de réponse AT, trig la broche d'activation
+          activateModem(1750);
+        hardCount++;
+      }
+
       loopCount++;
-      delay(5000L);
+      delay(2500L);
     }
   }
   return retCode;
 }
-
 
 //-----------------------------------------------------------------------
 
 
 //--- Setup et Loop -----------------------------------------------------
 void setup() {
-  SerialMon.begin(115200);
+  pinMode(DATALOG_PWR_PIN, OUTPUT);
+  digitalWrite(DATALOG_PWR_PIN, HIGH);
+
+  SerialMon.begin(monitorBaudRate);
   while (!Serial) {yield();}
-  for (int i=0; i<8; i++) {  //Boucle de délais de 8 secondes
-    SerialMon.print(".");
-    delay(1000);
-  }
-  SerialMon.println("o");
+
+  digitalWrite(DATALOG_PWR_PIN, LOW);
+
+  boucleDelais(1000,8,true);
+
   SerialMon.println("GSM GPS Tracker v."+String(_VERSION));
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-
-    // Set GSM module baud rate
-  SerialAT.begin(115200, SERIAL_8N1, RX1, TX1, false);
+  pinMode(LED_RED_PIN, OUTPUT);
+  digitalWrite(LED_RED_PIN, LOW);
+  
+  // Set GSM module baud rate
+  SerialAT.begin(modemBaudRate, SERIAL_8N1, RX1, TX1, false);
 
   if (!modem.testAT())
     activateModem(1750);
+  else enableGPS(false);  //Make sure GPS is turned OFF
 
   SerialMon.println("Wait 1sec ...");
   delay(1000);
 
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
-  SerialMon.print("Initializing modem...");
-  if (performModemInit()) SerialMon.println(" Success!");
-  else SerialMon.println(" Failed!"); //Devrait pas arriver...
+  SerialMon.print("Initializing modem: ");
+  if (performModemInit()) SerialMon.println("Success!");
+  else SerialMon.println("Failed!"); //Devrait pas arriver...
 
-
+  SerialMon.print("Connecting to network: ");
   while (!connectGPRSNetwork()) {
     SerialMon.print(".");
   }
@@ -533,13 +640,13 @@ void setup() {
   } else 
     SerialMon.println(" NTP init Failed.");
 
-  SerialMon.println("Play time! GPS first");
+  SerialMon.println("Ready! GPS first");
 
   // MQTT Broker setup
   //localMqtt.setServer(brokerShiftr, 1883);
   localMqtt.setServer(brokerTBCAL, 1883);
 
-  gpsTimer = -30;
+  gpsTimer = 0;
 
 }
 
@@ -550,17 +657,14 @@ void loop() {
     changeModeTimer = millis();
     if (gpsDataValid) { //Seulement si le data GPS est valide
       SerialMon.println("Switching mode to senddata. Turning GPS off");
-      changeModeDelay = modeSendData;
+      changeModeDelay = modeSendData;  //Ok but not used
       currentMode = SENDDATA;
-      enableGPS(false);
-      gpsEnabled = false;
+      gpsEnabled = enableGPS(false);
       SerialMon.print("Sending +CFUN AT cmd (+8sec delay) ");
-      modem.sendAT("+CFUN=1,1");
-      for (int i=0; i<8; i++) {  //Boucle de délais de 8 secondes
-        SerialMon.print(".");
-        delay(1000);
-      }
-      SerialMon.println("o");
+      //modem.sendAT("+CFUN=1,1");
+      modem.setPhoneFunctionality(1,1);
+
+      boucleDelais(1000,8,true);
     }
   }
   // Mise en hold car devrait plutôt être au module GSM d'indiquer lorsqu'il a envoyé le data et de retourner en mode GPS pour l'acquisition
@@ -575,63 +679,97 @@ void loop() {
       gpsTimer = millis();
       if(gpsEnabled) {
         static gpsDataStruc dataLoc;
-        if (parseGPSdata(dataLoc,false)) {
+        static int gpsDataCount = 0;
+        if (parseGPSdata(dataLoc,gpsDataCount,false)) {
           SerialMon.println("GPS data parsed successfully");
-          if (dataLoc.latitude != 0.0) { //Si la position n'est pas 0,0, on considérera qu'elle est plausible...
+          if (dataLoc.latitude != 0.0) { //Si la position n'est pas 0.0, on considérera qu'elle est plausible...
             digitalWrite(LED_PIN, HIGH);
+            digitalWrite(LED_RED_PIN, LOW);
             currentPos[0]=dataLoc.latitude;
             currentPos[1]=dataLoc.longitude;
             gpsDataValid = true;
             gpsAcquisitionFailed=0;
           }
         } else {
-           SerialMon.println("GPS data parsed FAILED");
-           gpsAcquisitionFailed++;
+           SerialMon.println("GPS data parsed FAILED ("+String(gpsAcquisitionFailed)+") gpsDataCount:"+String(gpsDataCount));
+           if (gpsDataCount < minimalMemberCount)  //Serious case?
+             gpsAcquisitionFailed++;
+           else if (gpsAcquisitionFailed<5) gpsAcquisitionFailed++;
            digitalWrite(LED_PIN, LOW);
-           if (gpsAcquisitionFailed>4 && gpsDataValid) gpsDataValid=false;
-           if (gpsAcquisitionFailed == 6) {
-             //Something wrong, let's try recycling:
-             enableGPS(false);
-             delay(2000);
-             enableGPS(true);
-             delay(1000);
+           if (gpsAcquisitionFailed>4 && gpsDataValid) {
+            gpsDataValid=false;
            }
+           if (gpsAcquisitionFailed > 4) digitalWrite(LED_RED_PIN, HIGH);
            if (gpsAcquisitionFailed == 10) {
-             //Hot start
-             enableGPS(false);
+             //Something wrong, let's try recycling:
+             SerialMon.println("Recycling level 1: dis/enable");
+             digitalWrite(LED_RED_PIN, HIGH);
+             gpsEnabled = enableGPS(false);
+             delay(2000);
+             digitalWrite(LED_RED_PIN, LOW);
+             gpsEnabled = enableGPS(true);
              delay(1000);
+             digitalWrite(LED_RED_PIN, HIGH);
+           }
+           if (gpsAcquisitionFailed == 25) {
+             //Hot start
+             SerialMon.println("Recycling level 2: hot start");
+             digitalWrite(LED_RED_PIN, HIGH);
+             gpsEnabled = enableGPS(false);
+             delay(1000);
+             digitalWrite(LED_RED_PIN, LOW);
              modem.sendAT("+CGNSHOT");
              delay(1000);
-             enableGPS(true);
+             digitalWrite(LED_RED_PIN, HIGH);
+             gpsEnabled = enableGPS(true);
              delay(1000);
-           }
-           if (gpsAcquisitionFailed == 14) {
-             //Cold start
-             enableGPS(false);
+             digitalWrite(LED_RED_PIN, LOW);
              delay(1000);
-             modem.sendAT("+CGNSWARM");
-             delay(1000);
-             enableGPS(true);
-             delay(1000);
-           }
-           if (gpsAcquisitionFailed >= 18) {
-             //Cold start
-             enableGPS(false);
-             delay(1000);
-             modem.sendAT("+CGNSCOLD");
-             delay(1000);
-             enableGPS(true);
-             delay(1000);
+             digitalWrite(LED_RED_PIN, HIGH);
              gpsAcquisitionFailed=0; //Start over
            }
+           // 26 juin - Mis en commentaires car je pense pas que ca aide...
+          //  if (gpsAcquisitionFailed == 14) {
+          //    //warm start
+          //    SerialMon.println("Recycling level 3: warm start");
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    enableGPS(false);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    modem.sendAT("+CGNSWARM");
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    enableGPS(true);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //  }
+          //  if (gpsAcquisitionFailed >= 18) {
+          //    //Cold start
+          //    SerialMon.println("Recycling level 4: cold start");
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    enableGPS(false);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    modem.sendAT("+CGNSCOLD");
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    enableGPS(true);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    gpsAcquisitionFailed=0; //Start over
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //  }
         }
       } else {
         //Try again enabling GPS feature
+        SerialMon.println("Enabling GPS");
         digitalWrite(LED_PIN, LOW);
         gpsDataValid=false;
         gpsAcquisitionFailed=0;
-        if (enableGPS(true))
-          gpsEnabled = true;
+        gpsEnabled = enableGPS(true);
       }
     }
   }
@@ -639,7 +777,7 @@ void loop() {
     if (gpsDataValid) {
       localMqtt.loop();
 
-      if (connectMQTTBroker(&localMqtt,1)) {
+      if (connectMQTTBroker(&localMqtt,2)) {
         localMqtt.loop();
         String dateTime;
         dateTime = getDateTimeStr();
@@ -693,14 +831,21 @@ void loop() {
             localMqtt.loop();
           }
 
-          changeModeTimer = millis();
-          changeModeDelay = modeGPS;
-          currentMode = GPS;
+          changeModeTimer = millis();  //Reset timer
+          changeModeDelay = modeGPS;   //Reload timer delay
+          currentMode = GPS;           //Return back to GPS acquisition mode
+          gpsDataValid=false;          //Make current as now invalid, force a new acquisition
+          SerialMon.println("Disconnecting MQTT");
           localMqtt.disconnect();
           localMqtt.loop();
-          SerialMon.println("Disconnecting MQTT");
           previousPos[0] = currentPos[0];
           previousPos[1] = currentPos[1];
+          SerialMon.print("Disconnecting GPRS: ");
+          //Close connection with gprs:
+          if (modem.gprsDisconnect())
+            SerialMon.println(" Ok.");
+          else
+            SerialMon.println(" Error (?!)");
         } else
           SerialMon.println("Failure sending Position");
       } else {
