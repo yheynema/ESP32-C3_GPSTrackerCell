@@ -29,7 +29,7 @@
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.6.8"
+#define _VERSION "0.6.9"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -150,6 +150,8 @@ uint32_t changeModeDelay = modeGPS;
 uint16_t iterationCounter = 0;
 
 uint16_t gsmMissedCounter = 0;
+
+uint16_t mqttConnectFailCount = 0;
 
 int ledStatus = LOW;
 //-----------------------------------------------------------------------
@@ -457,8 +459,7 @@ bool connectGPRSNetwork(int retry=3) {
       SerialMon.println("Network (re)connected");
     }
   } else { 
-    SerialMon.println("Network already connected");
-    
+    SerialMon.println("Network already connected"); 
   }
   //Maintenant, traiter la connexion GPRS:
   if (networkConnected) {
@@ -475,6 +476,15 @@ bool connectGPRSNetwork(int retry=3) {
       SerialMon.println(", NSM: n="+String(n)+" stat="+String(stat));
     else
       SerialMon.println(", NSM=got error");
+
+    //Cas particulier: network et gprs ok... mais si bcp de failure de connexion MQTT... tenter une déconnexion/reconnection du réseau gprs:
+    if (mqttConnectFailCount>20) {  //20x, arbitraire
+      SerialMon.print("Network ok but too many MQTT failures. Disconnecting/Reconnecting GPRS ");
+      modem.gprsDisconnect();
+      boucleDelais(1000,5,true);
+      SerialMon.println(" ");
+      mqttConnectFailCount = 0; //Reset le compteur
+    }
   
     // and make sure GPRS/EPS is still connected
     int loopCount = retry;
@@ -777,7 +787,7 @@ void loop() {
     if (gpsDataValid) {
       localMqtt.loop();
 
-      if (connectMQTTBroker(&localMqtt,2)) {
+      if (connectMQTTBroker(&localMqtt,1)) {
         localMqtt.loop();
         String dateTime;
         dateTime = getDateTimeStr();
@@ -825,6 +835,7 @@ void loop() {
           localMqtt.loop();
           SerialMon.print("Position telemetry data sent success: ");
           SerialMon.println(telemetryStr);
+          mqttConnectFailCount=0; //Reset counter
           if (localMqtt.publish(attributeTopic, attribStr.c_str())) {
             SerialMon.print("Position attribute data sent success: ");
             SerialMon.println(attribStr);
@@ -842,13 +853,14 @@ void loop() {
           previousPos[1] = currentPos[1];
           SerialMon.print("Disconnecting GPRS: ");
           //Close connection with gprs:
-          if (modem.gprsDisconnect())
+          if (modem.gprsDisconnect())  //3 juillet 2024: A contribué à améliorer la situation
             SerialMon.println(" Ok.");
           else
             SerialMon.println(" Error (?!)");
         } else
           SerialMon.println("Failure sending Position");
       } else {
+        mqttConnectFailCount++; //4 juillet 2024: suite à un long logging qui indiquait réseau et gprs ok mais trjs mqttConnect fail, on va compter et prendre les moyens (voir connectGPRSNetwork())
         connectGPRSNetwork();
       }
     } else {
