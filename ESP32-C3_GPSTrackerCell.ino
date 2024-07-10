@@ -29,7 +29,7 @@
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.6.9"
+#define _VERSION "0.6.10"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -628,8 +628,6 @@ void setup() {
   SerialMon.println("Wait 1sec ...");
   delay(1000);
 
-  // Restart takes quite some time
-  // To skip it, call init() instead of restart()
   SerialMon.print("Initializing modem: ");
   if (performModemInit()) SerialMon.println("Success!");
   else SerialMon.println("Failed!"); //Devrait pas arriver...
@@ -651,6 +649,16 @@ void setup() {
     SerialMon.println(" NTP init Failed.");
 
   SerialMon.println("Ready! GPS first");
+
+  SerialMon.print("Disconnecting GPRS: ");
+  //Close connection with gprs:
+  if (modem.gprsDisconnect())
+    SerialMon.println(" Ok.");
+  else
+    SerialMon.println(" Error (?!)");
+
+  SerialMon.println("Enabling GPS");
+  enableGPS(true);
 
   // MQTT Broker setup
   //localMqtt.setServer(brokerShiftr, 1883);
