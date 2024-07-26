@@ -27,11 +27,12 @@
  * v0.5.x: preparation d'envoi à TB
  * v0.6.x: optimisation, revue de code en bonne partie. revue de la fct enableGPS qui était possiblement en prblm.
  * v0.7.x: utilisation d'un GPS externe (le Adafruit Ultimate GPS v3)
+ * v0.7.4: changé le GPS externe pour un uBlox NEO6-M
  *
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.7.1"
+#define _VERSION "0.7.4"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -50,10 +51,12 @@
 
 //--- Definitions -------------------------------------------------------
 //Paramètres pour le port Serial1 (ESP32-C3):
-#define RX1 5
+#define RX1 5   // module SIM7080G
 #define TX1 4
-#define RXSWS 1
-#define TXSWS 0
+//#define RXSWS 1  // module GPS - Adafruit Ultimate GPS
+//#define TXSWS 0
+#define RXSWS 0  // module GPS - NEO-6M
+#define TXSWS 1
 
 //Broche d'activation du module SIM7080G (broche K)
 #define GSMKeyPin 6
@@ -61,7 +64,7 @@
 //Broche de la LED indiquant la validité du data GPS
 #define LED_PIN 7         // ESP32-C3 M5 Stamp
 #define LED_RED_PIN 8     // ESP32-C3 M5 Stamp
-#define DATALOG_PWR_PIN 9 //Allow data logger to start (external device)
+#define DATALOG_PWR_PIN 9 //Allow data logger to start (external device) -- strapping pin du ESP32-C3 Stamp??
 
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
 #define SerialMon Serial
