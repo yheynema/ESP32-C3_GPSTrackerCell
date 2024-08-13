@@ -4,8 +4,8 @@
  *  Programme:        GPS tracker
  *  Date:             22 juin 2024
  *  Auteur:           Yh
- *  Pltform matériel: ESP32-C3 M5 Stamp et module SIM7080G
- *  Pltform develop : Arduino 2.3.2 - ESP32 3.0.1
+ *  Pltform matériel: ESP32-C3 M5 Stamp / ESP32 DEV KIT et module SIM7080G
+ *  Pltform develop : Arduino 2.3.2 - ESP32 2.0.17
  *  Description:      Sert à tracert la position du dispositif dans le temps, via cellulaire.
  *  Fonctionnalités:  Position GPS, connectivité MQTT via réseau cellulaire, envoi à TB.
  *  Notes:
@@ -13,7 +13,7 @@
  */
  
 /* --- Materiel et composants -------------------------------------------
- * Module ESP32-C3 Stamp de M5
+ * Module ESP32-C3 Stamp de M5 ou ESP32 DEV KIT
  * Module GSM/GNSS SIM7080G
 */
 
@@ -25,11 +25,11 @@
  * v0.4.x: augmenter intervention sur un blocage que GPS par hot,warm,col start; fix sur calcul distance entre 2 pt
  * v0.5.x: preparation d'envoi à TB
  * v0.6.x: optimisation, revue de code en bonne partie. revue de la fct enableGPS qui était possiblement en prblm.
- *
+ * v0.7.1: probleme: ne marche plus... essai avec un controle de la broche Sleep (via GPIO 10)
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.6.10"
+#define _VERSION "0.7.3"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -56,6 +56,7 @@
 #define LED_PIN 7         // ESP32-C3 M5 Stamp
 #define LED_RED_PIN 8     // ESP32-C3 M5 Stamp
 #define DATALOG_PWR_PIN 9 //Allow data logger to start (external device)
+#define SLEEP_PIN  10     //SLEEP pin on SIM7080 module, assert low then HIGH
 
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
 #define SerialMon Serial
@@ -63,7 +64,7 @@
 // Bon pour un ESP32-C32
 #define SerialAT Serial1
 
-#define TINY_GSM_YIELD() { delay(4); }
+#define TINY_GSM_YIELD() { delay(2); }
 
 //Définition de la struture de données dans laquelle la string du GPS est récupérée:
 const int memberCount = 15;
@@ -265,6 +266,7 @@ bool getGSMNTP(int retry=3,bool rtc=false) {
 
   while (!modem.getNetworkTime(&ntp_year, &ntp_month, &ntp_day, &ntp_hour,&ntp_min, &ntp_sec, &ntp_timezone) && loopCount>0) {
     SerialMon.print("NTP loop: "); SerialMon.println(loopCount);
+    boucleDelais(1000,4,true); //Délais de 2 secondes
   }
 
   if (loopCount>0) {
@@ -392,7 +394,7 @@ void activateModem(int dly=0) {
   delay(dly);
   digitalWrite(GSMKeyPin,HIGH);
   if (dly>8000) delay(8000);  //Cas d'espèce: si on veut resetter le modem, on met un dly à 12-15 sec
-  pinMode(GSMKeyPin,INPUT);
+  //pinMode(GSMKeyPin,INPUT);  //High-z
 }
 
 String getNetworkModes() {
@@ -602,12 +604,18 @@ bool performModemInit() {
 //--- Setup et Loop -----------------------------------------------------
 void setup() {
   pinMode(DATALOG_PWR_PIN, OUTPUT);
+  pinMode(SLEEP_PIN, OUTPUT);
   digitalWrite(DATALOG_PWR_PIN, HIGH);
+  digitalWrite(SLEEP_PIN, HIGH);
 
   SerialMon.begin(monitorBaudRate);
   while (!Serial) {yield();}
 
   digitalWrite(DATALOG_PWR_PIN, LOW);
+
+  digitalWrite(SLEEP_PIN, LOW);
+  boucleDelais(55,1,false);
+  digitalWrite(SLEEP_PIN, HIGH);
 
   boucleDelais(1000,8,true);
 
@@ -625,14 +633,22 @@ void setup() {
     activateModem(1750);
   else enableGPS(false);  //Make sure GPS is turned OFF
 
+  modem.sleepEnable(false);
+
   SerialMon.println("Wait 1sec ...");
   delay(1000);
 
   SerialMon.print("Initializing modem: ");
-  if (performModemInit()) SerialMon.println("Success!");
+  if (performModemInit()) { 
+    SerialMon.println("Success!");
+    SerialMon.print("Modem info: ");
+    SerialMon.println(modem.getModemInfo());
+  }
   else SerialMon.println("Failed!"); //Devrait pas arriver...
 
-  SerialMon.print("Connecting to network: ");
+  
+
+  SerialMon.println("Connecting to network: ");
   while (!connectGPRSNetwork()) {
     SerialMon.print(".");
   }
