@@ -9,7 +9,7 @@
  *  Description:      Sert à tracert la position du dispositif dans le temps, via cellulaire.
  *  Fonctionnalités:  Position GPS, connectivité MQTT via réseau cellulaire, envoi à TB.
  *  Notes:
- *    
+ *    Le ESP32-C3 utilisé semble avoir des problèmes de stabilité d'alimentation, causant un dysfonctionnement de l'app. (12 aout 2024)
  */
  
 /* --- Materiel et composants -------------------------------------------
@@ -26,10 +26,11 @@
  * v0.5.x: preparation d'envoi à TB
  * v0.6.x: optimisation, revue de code en bonne partie. revue de la fct enableGPS qui était possiblement en prblm.
  * v0.7.1: probleme: ne marche plus... essai avec un controle de la broche Sleep (via GPIO 10)
+ * v0.8.x: changement de module uC pour le ESP32... fonctionne!  Mais prbl avec le GPS (du SIM7080)...
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.7.3"
+#define _VERSION "0.8.2"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -40,29 +41,31 @@
 #include <ArduinoJson.h>
 #include <TinyGPSPlus.h>
 #include "secrets.h"
+#include <HardwareSerial.h>
 
 //-----------------------------------------------------------------------
 
 
 //--- Definitions -------------------------------------------------------
-//Paramètres pour le port Serial1 (ESP32-C3):
-#define RX1 5
-#define TX1 4
+//Paramètres pour le port Serial1, le modem SIM7080
+#define RX1 16 //ESP32-WROOM   (ESP32-C3):5
+#define TX1 17 //ESP32-WROOM   (ESP32-C3):4
 
 //Broche d'activation du module SIM7080G (broche K)
-#define GSMKeyPin 6
+#define GSMKeyPin 23 //ESP32-WROOM   (ESP32-C3):6
 
 //Broche de la LED indiquant la validité du data GPS
-#define LED_PIN 7         // ESP32-C3 M5 Stamp
-#define LED_RED_PIN 8     // ESP32-C3 M5 Stamp
-#define DATALOG_PWR_PIN 9 //Allow data logger to start (external device)
-#define SLEEP_PIN  10     //SLEEP pin on SIM7080 module, assert low then HIGH
+#define LED_PIN 12 //ESP32-WROOM    (ESP32-C3):7         // ESP32-C3 M5 Stamp
+#define LED_RED_PIN 2 //ESP32-WROOM    (ESP32-C3):8     // ESP32-C3 M5 Stamp
+#define DATALOG_PWR_PIN 13//ESP32-WROOM   (ESP32-C3):9 //Allow data logger to start (external device)
+#define SLEEP_PIN  18   //ESP32-WROOM   (ESP32-C3):10     //SLEEP pin on SIM7080 module, assert low then HIGH
 
 // Set serial for debug console (to the Serial Monitor, default speed 115200)
 #define SerialMon Serial
 
-// Bon pour un ESP32-C32
-#define SerialAT Serial1
+// Port série pour le modem SIM7080G:
+//#define SerialAT Serial1   //(ESP32-C3):Serial1
+HardwareSerial  SerialAT(2); //ESP32-WROOM:Serial2
 
 #define TINY_GSM_YIELD() { delay(2); }
 
@@ -631,7 +634,7 @@ void setup() {
 
   if (!modem.testAT())
     activateModem(1750);
-  else enableGPS(false);  //Make sure GPS is turned OFF
+  //else enableGPS(false);  //Make sure GPS is turned OFF
 
   modem.sleepEnable(false);
 
@@ -734,34 +737,35 @@ void loop() {
             gpsDataValid=false;
            }
            if (gpsAcquisitionFailed > 4) digitalWrite(LED_RED_PIN, HIGH);
-           if (gpsAcquisitionFailed == 10) {
-             //Something wrong, let's try recycling:
-             SerialMon.println("Recycling level 1: dis/enable");
-             digitalWrite(LED_RED_PIN, HIGH);
-             gpsEnabled = enableGPS(false);
-             delay(2000);
-             digitalWrite(LED_RED_PIN, LOW);
-             gpsEnabled = enableGPS(true);
-             delay(1000);
-             digitalWrite(LED_RED_PIN, HIGH);
-           }
-           if (gpsAcquisitionFailed == 25) {
-             //Hot start
-             SerialMon.println("Recycling level 2: hot start");
-             digitalWrite(LED_RED_PIN, HIGH);
-             gpsEnabled = enableGPS(false);
-             delay(1000);
-             digitalWrite(LED_RED_PIN, LOW);
-             modem.sendAT("+CGNSHOT");
-             delay(1000);
-             digitalWrite(LED_RED_PIN, HIGH);
-             gpsEnabled = enableGPS(true);
-             delay(1000);
-             digitalWrite(LED_RED_PIN, LOW);
-             delay(1000);
-             digitalWrite(LED_RED_PIN, HIGH);
-             gpsAcquisitionFailed=0; //Start over
-           }
+           //Mis en commentaire au 12 août car je pense pas que ça aide vraiment...
+          //  if (gpsAcquisitionFailed == 10) {
+          //    //Something wrong, let's try recycling:
+          //    SerialMon.println("Recycling level 1: dis/enable");
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    gpsEnabled = enableGPS(false);
+          //    delay(2000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    gpsEnabled = enableGPS(true);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //  }
+          //  if (gpsAcquisitionFailed == 25) {
+          //    //Hot start
+          //    SerialMon.println("Recycling level 2: hot start");
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    gpsEnabled = enableGPS(false);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    modem.sendAT("+CGNSHOT");
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    gpsEnabled = enableGPS(true);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, LOW);
+          //    delay(1000);
+          //    digitalWrite(LED_RED_PIN, HIGH);
+          //    gpsAcquisitionFailed=0; //Start over
+          //  }
            // 26 juin - Mis en commentaires car je pense pas que ca aide...
           //  if (gpsAcquisitionFailed == 14) {
           //    //warm start
