@@ -30,7 +30,7 @@
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.8.2"
+#define _VERSION "0.8.4"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -699,9 +699,11 @@ void loop() {
       gpsEnabled = enableGPS(false);
       SerialMon.print("Sending +CFUN AT cmd (+8sec delay) ");
       //modem.sendAT("+CFUN=1,1");
-      modem.setPhoneFunctionality(1,1);
-
-      boucleDelais(1000,8,true);
+      //modem.setPhoneFunctionality(6,1);  //Indiqué dans la doc: si utilité mode 7, faut passer par 6 avant retour à 1 13 aout 2024)
+      modem.sendAT("+CFUN=6");
+      boucleDelais(1000,5,true);
+      modem.setPhoneFunctionality(1,1);  //Full func, Reset
+      boucleDelais(1000,3,true);
     }
   }
   // Mise en hold car devrait plutôt être au module GSM d'indiquer lorsqu'il a envoyé le data et de retourner en mode GPS pour l'acquisition
@@ -885,6 +887,8 @@ void loop() {
             SerialMon.println(" Ok.");
           else
             SerialMon.println(" Error (?!)");
+          modem.setPhoneFunctionality(7,0); //Offline, no reset
+          //delais?
         } else
           SerialMon.println("Failure sending Position");
       } else {
