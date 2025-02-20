@@ -27,10 +27,11 @@
  * v0.6.x: optimisation, revue de code en bonne partie. revue de la fct enableGPS qui était possiblement en prblm.
  * v0.7.1: probleme: ne marche plus... essai avec un controle de la broche Sleep (via GPIO 10)
  * v0.8.x: changement de module uC pour le ESP32... fonctionne!  Mais prbl avec le GPS (du SIM7080)...
+ * v0.9.x: chg pour librairie rduinoJson v 6.x au lieu de 7.x  (voir la note vav l'include)
 */
 //-----------------------------------------------------------------------
 
-#define _VERSION "0.8.4"
+#define _VERSION "0.9.2"
 
 //--- Déclaration des librairies (en ordre alpha) -----------------------
 #define TINY_GSM_MODEM_SIM7080
@@ -38,7 +39,10 @@
 #include <TinyGsmClient.h>
 #include <TimeLib.h>
 #include <PubSubClient.h>
+
+// ArduinoJson version 6.21.4, recommandée et expliquée par la lib Thingsboard https://github.com/thingsboard/thingsboard-client-sdk/issues/186#issuecomment-1877641466
 #include <ArduinoJson.h>
+
 #include <TinyGPSPlus.h>
 #include "secrets.h"
 #include <HardwareSerial.h>
@@ -844,8 +848,12 @@ void loop() {
         // serializeJson(doc,content);
 
 // Json document telemetry et attribute pour TB:
-        JsonDocument telemetry;
-        JsonDocument attribute;
+        // JsonDocument telemetry;  //Version 7.x
+        // JsonDocument attribute;  //Version 7.x
+
+        DynamicJsonDocument telemetry(512);  //Version 6.x
+        DynamicJsonDocument attribute(512);  //Version 6.x
+
         String telemetryStr;
         String attribStr;
         telemetry["IC"] = iterationCounter++;
